@@ -26,7 +26,7 @@ local ToonDl = WidgetContainer:extend{
     conn = nil,
     db_dir = DataStorage:getDataDir() .. "/db/",
     serv_url = "",
-    home_dir = G_reader_settings:readSetting("home_dir") or require("apps/filemanager/filemanagerutil").getDefaultDir()  or ".",
+    home_dir = "",
     api_key = "",
 }
 
@@ -64,13 +64,16 @@ function ToonDl:init()
         if json then  
             ToonDl.serv_url = json.serv_url
             ToonDl.api_key = json.api_key
+            ToonDl.home_dir = json.dl_dir
         else
             print("error, while parsing config")
         end
     else
         print("cant open config file")
     end
-    
+    if ToonDl.home_dir == "" then --put home_dir if nothing was given
+        ToonDl.home_dir = G_reader_settings:readSetting("home_dir") or require("apps/filemanager/filemanagerutil").getDefaultDir()  or "."
+    end
     local db_file = ToonDl.db_dir .. 'webtoon_plugin.sqlite3'
     lfs.mkdir(ToonDl.db_dir)
     --os.remove(db_file) -- only for dev
@@ -296,6 +299,18 @@ function ToonDl:Is_Ready(job_id,db_id)
                 UIManager:show(InfoMessage:new{
                     text = _("There was an server error"),
                 })
+                sink = {}  
+                socketutil:set_timeout()  
+                request = {  
+                    url     = ToonDl.serv_url .. "delete_job/" .. job_id,  
+                    method  = "DELETE",  
+                    headers = {  
+                        ["Authorization"] = "Bearer "..ToonDl.api_key
+                    },  
+                    sink    = ltn12.sink.table(sink),  
+                }  
+                code, headers, status = socket.skip(1, http.request(request))  
+                print("Failed job deletion status: "..tostring(status))
             else
                 UIManager:scheduleIn(5,function ()
                     print("Still waiting for dl...")
@@ -452,6 +467,23 @@ function ToonDl:DownScreen(id)
 end
 
 
+function ToonDl:UpdateJson()
+    local body = {
+        api_key = ToonDl.api_key,
+        serv_url = ToonDl.serv_url,
+        dl_dir = ToonDl.home_dir,
+    }
+
+    local body_json = rapidjson.encode(body)
+    local util = require("util")
+    local ok, err = util.writeToFile(body_json, get_script_dir().."config.json")  
+    if ok then  
+        print( "File written successfully" )
+    else  
+       print( "File NOT written successfully" )
+    end
+end
+
 function ToonDl:MainScreen()
     local how_many = ToonDl.conn:rowexec("SELECT COUNT(*) FROM Toons")
 
@@ -479,6 +511,33 @@ function ToonDl:MainScreen()
             --here give text input
             UIManager:show(url_input)
         end})
+
+    table.insert(rpairs,{"","Settings",callback = function ()
+        local settings = KeyValuePage:new{
+            title = "Settings",
+            kv_pairs = {
+                {"Download path",ToonDl.home_dir,hold_callback = function ()
+                    require("ui/downloadmgr"):new{
+                        title = _("Choose download directory"),
+                        onConfirm = function(path)
+                            --logger.dbg("set download directory to", path)
+                            --G_reader_settings:saveSetting("download_dir", path)
+                            print("new path:",path)
+                            ToonDl.home_dir = path
+                            ToonDl:UpdateJson()
+                            UIManager:nextTick(function()
+                                -- reinitialize dialog
+                            end)
+                        end,
+                    }:chooseDir()
+                end},
+                {"Api key","long press to change"},
+                {"Eps per file",10},
+                {"Server url",ToonDl.serv_url},
+            },
+        }
+        UIManager:show(settings)
+    end})
     
     local List_comics = KeyValuePage:new{
         title = "Webtoon dl",
