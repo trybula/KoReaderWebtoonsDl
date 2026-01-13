@@ -18,7 +18,7 @@ local SQ3 = require("lua-ljsqlite3/init")
 local lfs = require("libs/libkoreader-lfs")
 local DataStorage = require("datastorage")
 
-
+local ProgressbarDialog = require("ui/widget/progressbardialog")
 
 local ToonDl = WidgetContainer:extend{
     name = "Webtoon",
@@ -30,6 +30,40 @@ local ToonDl = WidgetContainer:extend{
     api_key = "",
 }
 
+function ToonDl:showBookDownloadProgress(book, custom_title)
+    local title = custom_title or _("Downloading…")
+
+    local progressbar_dialog = ProgressbarDialog:new{
+        title = "Downloading…",
+        subtitle = nil,
+        progress_max = 100,
+        refresh_time_seconds = 1
+    }
+    -- fix progress bar fill color on Koreader 2025.08
+    if progressbar_dialog.progress_bar then  
+        progressbar_dialog.progress_bar.fillcolor = require("ffi/blitbuffer").COLOR_BLACK
+    end
+
+    local report_callback = function(progress)
+        progressbar_dialog:reportProgress(progress)
+    end
+    
+    progressbar_dialog:show()
+    return progressbar_dialog, report_callback
+end
+
+function ToonDl:closeMessage(message_widget)
+    if message_widget then
+        if type(message_widget.close) == "function" then
+            message_widget:close()
+            -- Ensure complete screen refresh after closing the progress dialog
+            -- Use setDirty with "full" to completely redraw the screen area
+            UIManager:setDirty("all", "full")
+        else
+            UIManager:close(message_widget)
+        end
+    end
+end
 
 function ToonDl:CreateDB()
     ToonDl.conn:exec([[
@@ -225,7 +259,7 @@ function ToonDl:edit_comic_screen(id)
     return edit_input
 end
 
-function ToonDl:Is_Ready(job_id,db_id)
+function ToonDl:Is_Ready(job_id,db_id,update_progress,progressbar)
     --print("Running isready")
     local sink = {}  
     socketutil:set_timeout()  
@@ -246,6 +280,7 @@ function ToonDl:Is_Ready(job_id,db_id)
         local json, err = rapidjson.decode(content)  
         if json then  
             --print("Json parsed succesfully")
+            update_progress(json.progress)
             if json.progress == 100 then
                 print("READY")
                 local files = json.files
@@ -291,11 +326,13 @@ function ToonDl:Is_Ready(job_id,db_id)
                 code, headers, status = socket.skip(1, http.request(request))  
                 print("Deletion status: "..tostring(status))
 
+                ToonDl:closeMessage(progressbar)
                 UIManager:show(InfoMessage:new{
                     text = _("Download finished"),
                 })
                 return true
             elseif json.progress == -1 then
+                ToonDl:closeMessage(progressbar)
                 UIManager:show(InfoMessage:new{
                     text = _("There was an server error"),
                 })
@@ -314,16 +351,18 @@ function ToonDl:Is_Ready(job_id,db_id)
             else
                 UIManager:scheduleIn(5,function ()
                     print("Still waiting for dl...")
-                    ToonDl:Is_Ready(job_id,db_id)
+                    ToonDl:Is_Ready(job_id, db_id, update_progress,progressbar)
                 end)
             end
         else
+            ToonDl:closeMessage(progressbar)
             UIManager:show(InfoMessage:new{
                 text = _("Error while checking progress"),
             })
         end
 
     else
+        ToonDl:closeMessage(progressbar)
         UIManager:show(InfoMessage:new{
             text = _("Error while checking progress, got: "..tostring(status)),
         })
@@ -391,11 +430,16 @@ function ToonDl:DownScreen(id)
                             socketutil:reset_timeout()  
                             --content = table.concat(sink)
                             if code == 200 then
-                                UIManager:show(InfoMessage:new{
-                                    text = _("Download started, now please wait"),
-                                })
+
+
+                                --UIManager:show(InfoMessage:new{
+                                --    text = _("Download started, now please wait"),
+                                --})
+                                local progressbar,update_progress = ToonDl:showBookDownloadProgress()
+
                                 local curr_sec = time.now() + time.s(5)
-                                ToonDl:Is_Ready(json.job_id,id)
+
+                                ToonDl:Is_Ready(json.job_id,id,update_progress,progressbar)
                             else
                                 UIManager:show(InfoMessage:new{
                                     text = _("There was some error, cant download"),
